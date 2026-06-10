@@ -44,10 +44,12 @@ func runDownload(args []string) {
 	configPath := fs.String("c", "config/default.yaml", "config file path")
 	code := fs.String("s", "", "stock code (e.g. 600519.SH)")
 	from := fs.String("f", "", "start date (e.g. 2024-01-01)")
-	all := fs.Bool("a", false, "download all symbols")
+	var all bool
+	fs.BoolVar(&all, "a", false, "download all symbols")
+	fs.BoolVar(&all, "all", false, "download all symbols")
 	fs.Parse(args)
 
-	if err := cmd.Download(*configPath, *code, *from, *all); err != nil {
+	if err := cmd.Download(*configPath, *code, *from, all); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
