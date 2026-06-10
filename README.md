@@ -1,81 +1,317 @@
 # Quantify
 
-量化交易研究平台 —— 基于 QMT (国金证券) 的自建量化系统。
+量化交易研究平台，基于 QMT（国金证券）的自建量化系统。
 
-不做 QMT 官方工具的"二次开发"，而是从零搭建一套**自己的架构**，把 QMT 当作一个可替换的数据/交易驱动来用。
+不做 QMT 官方工具的二次开发，而是从零搭建自己的架构，把 QMT 当作一个可替换的数据/交易驱动来用。
 
-## 设计理念
+---
 
-```
-研究阶段 (macOS)                     实盘阶段 (Windows)
-──────────────                      ──────────────
-akshare → SQLite    ──迁移──→   xtdata → SQLite
-本地回测/因子研发                 xttrader 实盘下单
-Go CLI 调度                     Go CLI 调度 (同代码)
-```
+## 核心理念
 
-两个阶段共用同一套 Go + Python 代码，只换数据源配置。
+**Go 管流程和安全，Python 管计算和策略。**
 
-## 整体架构
+| | Go | Python |
+|---|---|---|
+| 角色 | 调度者 · 守门人 | 执行者 · 研究员 |
+| 能做什么 | 启动任务、读数据、做风控、下单 | 下载数据、算因子、跑回测、生成信号 |
+| 不能做什么 | 不算因子、不跑策略逻辑 | 不直接下单、不接触风控 |
+| 实盘阶段 | **唯一的交易出口** | 只产出信号 |
 
-```
-┌──────────────────────────────────────────────────┐
-│                    Go CLI (qt)                     │
-│  入口 · 命令分派 · 定时调度 · 数据库读               │
-└─────────────┬────────────────────────────────────┘
-              │  spawn subprocess
-              ▼
-┌──────────────────────────────────────────────────┐
-│                 Python (量化引擎)                  │
-│  ┌──────────┐ ┌──────────┐ ┌──────────────────┐  │
-│  │  data/   │ │ factors/ │ │ strategy/        │  │
-│  │ 数据下载  │ │ 因子计算  │ │ 策略 · 信号生成    │  │
-│  └──────────┘ └──────────┘ └──────────────────┘  │
-│  ┌──────────────────────────────────────────┐    │
-│  │              backtest/  回测引擎           │    │
-│  └──────────────────────────────────────────┘    │
-└─────────────┬────────────────────────────────────┘
-              │  read / write
-              ▼
-┌──────────────────────────────────────────────────┐
-│              SQLite (data/quantify.db)             │
-│  行情数据 · 信号 · 持仓 · 订单 (未来)                │
-└──────────────────────────────────────────────────┘
-```
+---
 
-### 数据流
+## 两阶段架构
+
+### 研究阶段（当前）
 
 ```
-config/default.yaml
-       │
-       ▼
-  ┌─────────┐  akshare / xtdata   ┌──────────┐
-  │ qt      │ ─────────────────→  │ Python   │
-  │ download│ ←─── SQLite ─────── │ download │
-  └─────────┘                     └──────────┘
-       │
-       ▼
-  ┌─────────┐
-  │ qt      │ ←── 直接读 SQLite
-  │  list   │
-  └─────────┘
+                    ┌─────────────────┐
+                    │  用户敲 qt 命令   │
+                    └────────┬────────┘
+                             │
+              ┌──────────────┴──────────────┐
+              │                             │
+        qt download                   qt backtest
+              │                        (规划中)
+              │                             │
+     ┌────────┴────────┐           ┌────────┴────────┐
+     │  Go spawn       │           │  Go spawn       │
+     │  Python 子进程   │           │  Python 子进程   │
+     └────────┬────────┘           └────────┬────────┘
+              │                             │
+              ▼                             ▼
+     ┌────────────────┐           ┌────────────────┐
+     │  Python         │           │  Python         │
+     │  akshare 下载    │           │  SQLite 取行情   │
+     │  → 写入 SQLite   │           │  → 策略算信号    │
+     │                  │           │  → 模拟撮合      │
+     │                  │           │  → 输出指标      │
+     └────────┬─────────┘           └────────────────┘
+              │                             │
+              ▼                             │
+     ┌────────────────────────────┐         │
+     │      data/quantify.db       │◄────────┘
+     │                            │
+     │   daily_kline_tab (行情)    │
+     │   backtest_results (回测)   │
+     └────────────┬───────────────┘
+                  │
+     ┌────────────┴───────────────┐
+     │  Go 读 DB (仅查询/统计)     │
+     │  qt list → GetStats()      │
+     └────────────────────────────┘
 ```
 
-### 职责划分
+Go 现在只读表做展示，Python 承担全部量化工作。
 
-| 层 | 语言 | 职责 |
-|----|------|------|
-| CLI / 调度 | Go | 命令入口、子进程管理、SQLite 查询、定时任务 |
-| 策略 / 数据 | Python | 行情下载、因子计算、回测、信号生成 |
-| 存储 | SQLite | 所有持久化数据，Go 和 Python 共享读写 |
+---
 
-## 快速开始
+### 实盘阶段（未来）
+
+```
+     ┌─────────────────────┐
+     │  Python (定时/事件)       │
+     │  因子计算 → 产生信号   │
+     └──────────┬──────────┘
+                │
+       INSERT INTO signals
+                │
+                ▼
+     ┌─────────────────────┐
+     │  Go (定时轮询)          │
+     │                       │
+     │  读 signals 表        │──── 这就是 Go 读表的意义
+     │    ↓                  │
+     │  风控检查              │     Python 不能直接下单
+     │  · 单票仓位超限？      │     Go 是唯一的下单通道
+     │  · 日亏损超限？        │
+     │  · 可用资金够吗？      │
+     │    ↓                  │
+     │  xttrader 下单        │
+     └───────────────────────┘
+```
+
+Python 只负责"建议买入"，Go 决定"是否执行"。策略代码没有能力亏钱。
+
+---
+
+## 项目结构
+
+```
+quantify/
+│
+├── cmd/qt/main.go                     # Go 入口，命令路由
+│
+├── internal/
+│   ├── cmd/
+│   │   ├── init.go                    # qt init：验证数据库连接
+│   │   └── download.go                # qt download：启动 Python 下载数据
+│   │
+│   ├── config/
+│   │   └── config.go                  # 读 YAML → Config struct
+│   │
+│   ├── db/
+│   │   ├── db.go                      # GORM 连接管理（打开/关闭）
+│   │   └── daily_kline_repo.go        # 日线数据仓储（CURD 接口）
+│   │
+│   └── model/
+│       └── dbmodel/
+│           └── daily_kline.go         # GORM Model → daily_kline_tab 映射
+│
+├── python/
+│   ├── pyproject.toml                 # uv 项目定义（akshare, pyyaml, loguru）
+│   ├── .venv/                         # Python 3.12 虚拟环境（uv 管理）
+│   │
+│   ├── quantify/
+│   │   ├── config.py                  # Python 侧配置加载（和 Go 读同一份 YAML）
+│   │   │
+│   │   ├── data/
+│   │   │   ├── schema.py              # daily_kline_tab 建表 DDL
+│   │   │   └── downloader.py          # akshare 下载日线 → 写入 SQLite
+│   │   │
+│   │   ├── factors/                   # 因子计算（规划中）
+│   │   ├── strategy/                  # 策略基类（规划中）
+│   │   └── backtest/                  # 回测引擎（规划中）
+│   │       ├── engine.py              # 模拟交易引擎
+│   │       ├── metrics.py             # 指标计算
+│   │       └── run.py                 # 回测入口
+│   │
+│   ├── strategies/                    # 具体策略实现
+│   │   └── ma_cross.py               # 示例：双均线策略
+│   │
+│   └── tests/
+│
+├── config/
+│   └── default.yaml                   # 全局配置（Go 和 Python 共享）
+│
+├── data/
+│   └── quantify.db                    # SQLite 数据库（gitignore）
+│
+├── logs/                              # 日志目录（gitignore）
+│
+├── go.mod / go.sum                    # Go 依赖（GORM, yaml, sqlite 驱动）
+├── Makefile                           # 构建和运行命令
+├── .gitignore
+└── README.md
+```
+
+---
+
+## Go ↔ Python 协作机制
+
+Go 和 Python 是两个独立的进程，不通过 HTTP、gRPC、管道等方式通信。它们通过三种方式协作，**这三种方式不是互斥的，一次 `qt download --all` 就把三者全走了一遍**。
+
+---
+
+### 协作全景
+
+以 `qt download --all` 为例，看一次命令中三种方式如何叠加：
+
+```
+用户: qt download --all
+
+  ① 方式三: 共享 YAML
+  ┌──────────────────────────────────┐
+  │ Go:  config.LoadConfig()         │  读 config/default.yaml
+  │      ．拿 db.path → ./data/quantify.db    │
+  │      ．拼成绝对路径传给 Python            │
+  │                                  │
+  │ Py:  load_config()               │  读同一份 config/default.yaml
+  │      ．拿 data.symbols → ['000001.SZ','600519.SH']
+  │      ．拿 data.start_date → '2015-01-01'
+  └──────────────────────────────────┘
+         │                              │
+         ▼                              │
+  ② 方式一: spawn 子进程                  │
+  ┌──────────────────────────────────┐  │
+  │ Go:  exec.Command(               │  │
+  │        ".venv/bin/python",        │  │
+  │        "-m",                      │  │
+  │        "quantify.data.downloader", │  │
+  │        "--db", dbPath,     ←──────┘  (方式三拿到的路径)
+  │        "--all"                     │
+  │      )                            │
+  │      等待 Python 跑完 ...           │
+  └──────────┬───────────────────────┘
+             │
+             ▼
+  ┌──────────────────────────────────┐
+  │ Python: akshare 下载 600519.SH    │
+  │         → pandas 清洗             │
+  │         → INSERT INTO daily_kline_tab
+  └──────────┬───────────────────────┘
+             │
+             ▼
+  ③ 方式二: 共享 SQLite
+  ┌──────────────────────────────────┐
+  │ Python 刚写完 → data/quantify.db  │
+  │                 ↑                │
+  │ Go 接着读 ←─────┘                │
+  │ DailyKlineRepo.GetStats()        │
+  │ → "Symbols: 2, Rows: 1176"       │
+  └──────────────────────────────────┘
+```
+
+---
+
+### 方式一：Go spawn Python 子进程
+
+**做什么**：Go 启动一个 Python 进程，给它传参数，等它跑完。
+
+**什么时候用**：任何需要 Python 干活的命令 —— 下载数据、跑回测、跑策略。
+
+**谁触发谁**：Go → Python（单向，Go 是老板，Python 是打工人）。
+
+**实现文件**：`internal/cmd/download.go`
+
+```go
+// Go 启动 Python 子进程
+c := exec.Command(venvPython, "-m", "quantify.data.downloader",
+    "--db", dbPath, "--all")
+c.Dir = "python/"          // 让 Python 找到 quantify 包
+c.Stdout = os.Stdout        // Python 的 print → 终端
+c.Run()                     // 阻塞，等 Python 退出
+```
+
+**局限**：这是"一次性"的协作。Python 跑完就退出，Go 不能中途和它对话。适合离线任务（下载、回测），不适合实时交互。
+
+---
+
+### 方式二：共享 SQLite 文件
+
+**做什么**：Go 和 Python 读写同一个 `data/quantify.db` 文件，通过数据库交换数据。
+
+**什么时候用**：
+- **当下**：Python 下载完写表，Go 用 `list` 命令读统计。
+- **将来**：Python 把信号写入 `signals` 表，Go 读出来做风控下单。Python 回测结果写入 `backtest_results` 表，Go 读出来展示。
+
+**谁触发谁**：无主次。双方平等读写，不分先后。
+
+**实现文件**：
+| Go | Python |
+|----|--------|
+| `db/daily_kline_repo.go` （GORM） | `data/downloader.py` （sqlite3） |
+| `model/dbmodel/daily_kline.go` （映射） | `data/schema.py` （建表 DDL） |
+
+**为什么不用 HTTP/gRPC**：项目跑在本地单机，SQLite 文件就是最快的 IPC。不加网络层，零配置，零延迟。
+
+---
+
+### 方式三：共享 YAML 配置文件
+
+**做什么**：Go 和 Python 各自读取同一份 `config/default.yaml`，各取自己需要的字段。
+
+**什么时候用**：**每次执行任何命令都在用**。它不是可选的 —— 两边都需要从配置中拿信息才能工作。
+
+**Go 拿什么**：
+```go
+cfg, _ := config.LoadConfig("config/default.yaml")
+cfg.DB.Path    // "./data/quantify.db"  → 传给 Python 子进程
+```
+Go 只关心 `db.path`，因为它要告诉 Python "数据写到哪儿"。
+
+**Python 拿什么**：
+```python
+cfg = load_config()
+cfg["data"]["symbols"]    # ["000001.SZ", "600519.SH"]
+cfg["data"]["start_date"] # "2015-01-01"
+```
+Python 关心 `symbols` 和 `start_date`，因为它要决定"下载哪些标的、从哪天开始"。
+
+**为什么两边各读各的，不通过 Go 传参**：
+- 配置字段会越来越多（数据源、手续费率、风控阈值...），全用命令行参数传太臃肿
+- 让 Python 自己读配置，加新字段时不用改 Go 的传参逻辑
+- Go 传给 Python 的只有**关键变量**（如 `--db`），其余 Python 自己从 YAML 拿
+
+**路径解析差异**：
+| | Go | Python |
+|---|---|---|
+| 基准 | `os.Getwd()`（项目根） | `ROOT_DIR`（`__file__` 上溯 3 层） |
+| 原因 | Go 从项目根启动 | Python 被 Go 在 `python/` 子目录下启动 |
+| `./data/quantify.db` 解析为 | `/project/data/quantify.db` | `/project/data/quantify.db` |
+| **结果一致** | 殊途同归 |
+
+---
+
+### 三种方式对比
+
+| | 方式一 spawn | 方式二 SQLite | 方式三 YAML |
+|---|---|---|---|
+| 方向 | Go → Python（单向） | 双向读写 | 各自独立读 |
+| 时效 | 一次性（任务跑完结束） | 持久（数据一直存在） | 启动时加载 |
+| Go 做的事 | 启动 + 等结果 | 读统计 / 读信号 | 拿 db.path |
+| Python 做的事 | 下载 / 回测 / 算因子 | 写数据 / 读行情 | 拿 symbols / 参数 |
+| 当下用到 | `qt download` | `qt list` | 所有命令 |
+| 将来用到 | `qt backtest`, `qt run` | 信号-下单链路 | 所有命令 |
+
+---
+
+## 使用指南
 
 ### 环境要求
 
-- Go 1.21+
-- [uv](https://github.com/astral-sh/uv) (Python 包管理器)
-- Python 3.12 (通过 uv 自动安装)
+- Go 1.21+（`/Users/arvinz/sdk/go1.25.4/bin/go`）
+- [uv](https://github.com/astral-sh/uv) Python 包管理器
+- Python 3.12（uv 自动安装）
 
 ### 安装
 
@@ -86,95 +322,128 @@ make python-install
 # 编译 Go CLI
 make build
 
-# 初始化项目（建目录 + 数据库建表）
+# 初始化项目（验证数据库连接）
 make init
 ```
 
-### 下载数据
+### 下载行情数据
 
 ```bash
-# 下载配置文件中全部标的
+# 下载配置中所有标的
 make download
 
 # 下载单只标的
 ./bin/qt download -s 600519.SH -f 2024-01-01
+
+# 下载多只标的（逗号分隔）
+./bin/qt download -s 600519.SH,000001.SZ -f 2024-01-01
 ```
 
-### 查看数据
+### 查看数据概览
 
 ```bash
 make list
 
-# 输出:
+# 输出示例：
 # Database:     /path/to/data/quantify.db
-# Symbols:      1
-# Total Rows:   588
+# Symbols:      2
+# Total Rows:   1176
 # Date Range:   2024-01-02 ~ 2026-06-10
 ```
 
-## 项目结构
-
-```
-quantify/
-├── cmd/qt/main.go              # Go CLI 入口
-├── internal/
-│   ├── cmd/
-│   │   ├── root.go             # 命令注册
-│   │   ├── init.go             # qt init
-│   │   ├── download.go         # qt download
-│   │   └── list.go             # qt list
-│   ├── config/config.go        # YAML 配置解析
-│   └── db/sqlite.go            # SQLite 封装 (建表/统计)
-├── python/
-│   ├── pyproject.toml          # uv 项目定义
-│   ├── quantify/
-│   │   ├── config.py           # Python 侧配置加载
-│   │   ├── data/
-│   │   │   ├── schema.py       # 建表 DDL
-│   │   │   └── downloader.py   # 数据下载 (akshare)
-│   │   ├── factors/            # 因子计算
-│   │   ├── strategy/           # 策略基类
-│   │   └── backtest/           # 回测引擎
-│   └── strategies/             # 具体策略
-├── config/default.yaml         # 全局配置
-├── data/quantify.db            # SQLite 数据库 (gitignore)
-├── logs/                       # 日志 (gitignore)
-├── Makefile
-└── .gitignore
-```
+---
 
 ## 配置
 
 ```yaml
 # config/default.yaml
 db:
-  path: ./data/quantify.db
+  path: ./data/quantify.db       # SQLite 文件路径
 
 data:
-  source: akshare          # 数据源: akshare | xtdata
+  source: akshare                 # 数据源：akshare（研究）| xtdata（实盘）
   start_date: "2015-01-01"
   symbols:
     - "000001.SZ"
     - "600519.SH"
 ```
 
+换数据源只需改 `source` 字段，代码不动。
+
+---
+
+## 回测流程（规划中）
+
+```
+用户: qt backtest --strategy ma_cross --code 600519.SH --start 2020-01-01 --end 2024-12-31
+
+  1. Go cmd/backtest.go ──→ spawn Python -m quantify.backtest.run
+  2. Python 从 SQLite 取日线数据
+  3. Python 加载策略 → 计算信号
+  4. Python 模拟交易 → 计算指标（收益/夏普/回撤/胜率）
+  5. Python 打印结果到终端
+  6. 可选：结果写回 backtest_results 表
+```
+
+策略接口约定：
+
+```python
+class Strategy:
+    def generate(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        df 包含列: trade_date, open, high, low, close, volume, amount
+        返回 df，附加 signal 列 (1=买, -1=卖, 0=持有)
+        """
+        ...
+```
+
+---
+
+## 实盘流程（未来）
+
+```
+定时任务或 qt run 触发
+  │
+  ├─ Python：因子计算 → 产生信号 → INSERT INTO signals
+  │
+  └─ Go：轮询 signals 表
+       ├─ 风控检查（仓位/亏损/资金）
+       ├─ 通过 → xttrader 下单 → INSERT INTO orders
+       └─ 拒绝 → 记录日志/报警
+```
+
+---
+
+## 数据库表
+
+| 表名 | 用途 | 阶段 |
+|------|------|------|
+| `daily_kline_tab` | A 股日线行情 | 已实现 |
+| `signals` | 策略信号 | 规划中 |
+| `backtest_results` | 回测结果 | 规划中 |
+| `orders` | 实盘订单记录 | 规划中 |
+| `positions` | 当前持仓 | 规划中 |
+
+---
+
 ## 技术栈
 
-- **Go**: CLI、调度、SQLite 操作
-- **Python 3.12**: 数据下载、因子计算、回测、策略
-- **SQLite**: 本地持久化存储
-- **akshare**: 公开行情数据源（研究阶段）
-- **QMT/xtquant**: 券商行情+交易（实盘阶段，需 Windows）
+| 组件 | 选型 | 理由 |
+|------|------|------|
+| CLI 框架 | Go stdlib `flag` | 够用，零依赖 |
+| 数据库 | SQLite + GORM | 零配置部署，Repository 模式可切换 |
+| Python 包管理 | uv | 极快，自带 venv 和 lock |
+| 行情源（研究） | akshare | 免费，覆盖 A 股日线 |
+| 行情+交易（实盘） | QMT xtquant | 券商提供，仅 Windows |
+| 日志 | loguru | Python 侧开箱即用 |
 
-## 阶段规划
+---
+
+## 开发路线图
 
 | 阶段 | 状态 | 内容 |
 |------|------|------|
-| 一 | 已完成 | 项目骨架、Go CLI、数据下载入库 |
-| 二 | 规划中 | 回测引擎、因子框架 |
-| 三 | 规划中 | 策略研发、信号生成 |
-| 四 | 未来 | 接入 QMT 实盘、风控、订单管理 |
-
-## License
-
-MIT
+| **一** | 已完成 | 项目骨架、Go CLI、配置系统、akshare 数据下载 |
+| **二** | 待开始 | 回测引擎（engine + metrics + run）、策略示例（ma_cross） |
+| **三** | 规划中 | 因子框架、更多策略、参数优化 |
+| **四** | 未来 | 接入 QMT xtquant、信号-下单通道、风控层 |
