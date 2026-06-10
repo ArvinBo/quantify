@@ -65,75 +65,110 @@ cd python && uv sync
 make build           # 编译 Go
 make init            # 验证数据库
 make download        # 下载全部标的
-make list            # 数据概览
+# 手动查库: sqlite3 data/quantify.db "SELECT COUNT(*) FROM daily_kline_tab"
 ```
 
 ---
 
 ## 如何添加一个新命令
 
-以 `qt list` 为例（展示数据库概览）：
+以 `qt backtest` 为例（跑回测，下一个要实现的命令）：
 
-### 1. Go 侧：创建 `internal/cmd/list.go`
+### 1. Go 侧：创建 `internal/cmd/backtest.go`
 
 ```go
 package cmd
 
 import (
     "fmt"
+    "os"
+    "os/exec"
+    "path/filepath"
+
     "quantify/internal/config"
-    "quantify/internal/db"
 )
 
-func ListDB(configPath string) error {
+func Backtest(configPath, strategy, code, startDate, endDate string) error {
     cfg, _ := config.LoadConfig(configPath)
-    database, _ := db.Open(cfg.DB.Path)
-    defer db.Close(database)
 
-    repo := db.NewDailyKlineRepo(database)
-    stats, _ := repo.GetStats()
+    base, _ := os.Getwd()
+    pythonDir := filepath.Join(base, "python")
+    exe := filepath.Join(pythonDir, ".venv", "bin", "python")
 
-    fmt.Printf("Symbols: %d\n", stats.SymbolCount)
-    fmt.Printf("Rows:    %d\n", stats.TotalRows)
-    fmt.Printf("Date:    %s ~ %s\n", stats.MinDate, stats.MaxDate)
-    return nil
+    scriptArgs := []string{"-m", "quantify.backtest.run",
+        "--db", cfg.DB.Path,
+        "--strategy", strategy,
+        "--code", code,
+        "--start", startDate,
+        "--end", endDate,
+    }
+
+    c := exec.Command(exe, scriptArgs...)
+    c.Stdout = os.Stdout
+    c.Stderr = os.Stderr
+    c.Dir = pythonDir
+    return c.Run()
 }
 ```
+
+结构和 `internal/cmd/download.go` 一致：加载配置 → 拼 Python 参数 → `exec.Command` → 等跑完。
 
 ### 2. 注册命令：修改 `cmd/qt/main.go`
 
 ```go
-case "list":
-    runList(os.Args[2:])
+case "backtest":
+    runBacktest(os.Args[2:])
 
-func runList(args []string) {
-    fs := flag.NewFlagSet("list", flag.ExitOnError)
+func runBacktest(args []string) {
+    fs := flag.NewFlagSet("backtest", flag.ExitOnError)
     configPath := fs.String("c", "config/default.yaml", "config file path")
+    strategy := fs.String("strategy", "", "strategy name")
+    code := fs.String("code", "", "stock code")
+    start := fs.String("start", "", "start date")
+    end := fs.String("end", "", "end date")
     fs.Parse(args)
-    if err := cmd.ListDB(*configPath); err != nil {
+
+    if err := cmd.Backtest(*configPath, *strategy, *code, *start, *end); err != nil {
         fmt.Fprintln(os.Stderr, err)
         os.Exit(1)
     }
 }
 ```
 
-### 3. 如果有 Python 任务（如 `qt backtest`）
-
-Go 侧函数和 `internal/cmd/download.go` 结构一样：`exec.Command(venvPython, "-m", "quantify.xxx", ...)`。
-
-Python 侧创建对应的入口文件，如 `quantify/backtest/run.py`：
+### 3. Python 侧：创建 `quantify/backtest/run.py`
 
 ```python
+import argparse
+import sqlite3
+import importlib
+
+from quantify.config import load_config
+
 def main():
     cfg = load_config()
+    
     parser = argparse.ArgumentParser()
     parser.add_argument("--db")
     parser.add_argument("--strategy")
     parser.add_argument("--code")
-    # ...
+    parser.add_argument("--start")
+    parser.add_argument("--end")
     args = parser.parse_args()
-    # 干活...
 
+    # 1. 取数据
+    conn = sqlite3.connect(args.db)
+    df = pd.read_sql_query(
+        "SELECT * FROM daily_kline_tab WHERE code = ? AND trade_date >= ? AND trade_date <= ? ORDER BY trade_date",
+        conn, params=(args.code, args.start, args.end))
+    
+    # 2. 加载策略
+    mod = importlib.import_module(f"strategies.{args.strategy}")
+    strategy = mod.Strategy()
+
+    # 3. 跑回测
+    signals = strategy.generate(df)
+    # ... engine.run(df, signals) → 指标 → 打印
+    
 if __name__ == "__main__":
     main()
 ```

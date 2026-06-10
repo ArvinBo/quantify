@@ -25,7 +25,6 @@ make python-install   # 安装 Python 依赖（uv）
 make build            # 编译 Go CLI
 make init             # 初始化数据库
 make download         # 下载行情数据
-make list             # 查看数据概览
 ```
 
 ```bash
