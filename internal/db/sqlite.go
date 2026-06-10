@@ -8,7 +8,7 @@ import (
 )
 
 const schemaSQL = `
-CREATE TABLE IF NOT EXISTS daily_kline (
+CREATE TABLE IF NOT EXISTS daily_kline_tab (
     code       TEXT    NOT NULL,
     trade_date TEXT    NOT NULL,
     open       REAL,
@@ -52,17 +52,17 @@ type Stats struct {
 func GetStats(db *sql.DB) (*Stats, error) {
 	s := &Stats{}
 
-	row := db.QueryRow("SELECT COUNT(DISTINCT code) FROM daily_kline")
+	row := db.QueryRow("SELECT COUNT(DISTINCT code) FROM daily_kline_tab")
 	if err := row.Scan(&s.SymbolCount); err != nil {
 		return nil, fmt.Errorf("count symbols: %w", err)
 	}
 
-	row = db.QueryRow("SELECT COUNT(*) FROM daily_kline")
+	row = db.QueryRow("SELECT COUNT(*) FROM daily_kline_tab")
 	if err := row.Scan(&s.TotalRows); err != nil {
 		return nil, fmt.Errorf("count rows: %w", err)
 	}
 
-	row = db.QueryRow("SELECT MIN(trade_date), MAX(trade_date) FROM daily_kline")
+	row = db.QueryRow("SELECT MIN(trade_date), MAX(trade_date) FROM daily_kline_tab")
 	var minDate, maxDate sql.NullString
 	if err := row.Scan(&minDate, &maxDate); err != nil {
 		return nil, fmt.Errorf("date range: %w", err)
