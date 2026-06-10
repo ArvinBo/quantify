@@ -1,0 +1,9 @@
+db:
+  path: ./data/quantify.db
+
+data:
+  source: akshare
+  start_date: "2015-01-01"
+  symbols:
+    - "000001.SZ"
+    - "600519.SH"
