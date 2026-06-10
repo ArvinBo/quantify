@@ -1,42 +1,32 @@
 package db
 
 import (
-	"database/sql"
 	"fmt"
 
-	_ "github.com/mattn/go-sqlite3"
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
+
+	"quantify/internal/model/dbmodel"
 )
 
-const schemaSQL = `
-CREATE TABLE IF NOT EXISTS daily_kline_tab (
-    code       TEXT    NOT NULL,
-    trade_date TEXT    NOT NULL,
-    open       REAL,
-    high       REAL,
-    low        REAL,
-    close      REAL,
-    volume     REAL,
-    amount     REAL,
-    PRIMARY KEY (code, trade_date)
-);
-`
-
-func Open(dbPath string) (*sql.DB, error) {
-	db, err := sql.Open("sqlite3", dbPath+"?_journal_mode=WAL&_busy_timeout=5000")
+func Open(dbPath string) (*gorm.DB, error) {
+	db, err := gorm.Open(sqlite.Open(dbPath+"?_journal_mode=WAL&_busy_timeout=5000"), &gorm.Config{})
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
-
-	if err := db.Ping(); err != nil {
-		return nil, fmt.Errorf("ping db: %w", err)
-	}
-
 	return db, nil
 }
 
-func Migrate(db *sql.DB) error {
-	_, err := db.Exec(schemaSQL)
+func Close(db *gorm.DB) error {
+	sqlDB, err := db.DB()
 	if err != nil {
+		return fmt.Errorf("get sql.DB: %w", err)
+	}
+	return sqlDB.Close()
+}
+
+func Migrate(db *gorm.DB) error {
+	if err := db.AutoMigrate(&dbmodel.DailyKline{}); err != nil {
 		return fmt.Errorf("migrate: %w", err)
 	}
 	return nil
@@ -49,30 +39,32 @@ type Stats struct {
 	MaxDate     string
 }
 
-func GetStats(db *sql.DB) (*Stats, error) {
+func GetStats(db *gorm.DB) (*Stats, error) {
 	s := &Stats{}
 
-	row := db.QueryRow("SELECT COUNT(DISTINCT code) FROM daily_kline_tab")
-	if err := row.Scan(&s.SymbolCount); err != nil {
+	var symbolCount int64
+	if err := db.Model(&dbmodel.DailyKline{}).Distinct("code").Count(&symbolCount).Error; err != nil {
 		return nil, fmt.Errorf("count symbols: %w", err)
 	}
+	s.SymbolCount = int(symbolCount)
 
-	row = db.QueryRow("SELECT COUNT(*) FROM daily_kline_tab")
-	if err := row.Scan(&s.TotalRows); err != nil {
+	var totalRows int64
+	if err := db.Model(&dbmodel.DailyKline{}).Count(&totalRows).Error; err != nil {
 		return nil, fmt.Errorf("count rows: %w", err)
 	}
+	s.TotalRows = int(totalRows)
 
-	row = db.QueryRow("SELECT MIN(trade_date), MAX(trade_date) FROM daily_kline_tab")
-	var minDate, maxDate sql.NullString
-	if err := row.Scan(&minDate, &maxDate); err != nil {
+	var dr struct {
+		MinDate string
+		MaxDate string
+	}
+	if err := db.Model(&dbmodel.DailyKline{}).
+		Select("MIN(trade_date) as min_date, MAX(trade_date) as max_date").
+		Scan(&dr).Error; err != nil {
 		return nil, fmt.Errorf("date range: %w", err)
 	}
-	if minDate.Valid {
-		s.MinDate = minDate.String
-	}
-	if maxDate.Valid {
-		s.MaxDate = maxDate.String
-	}
+	s.MinDate = dr.MinDate
+	s.MaxDate = dr.MaxDate
 
 	return s, nil
 }
