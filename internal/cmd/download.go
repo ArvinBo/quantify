@@ -9,7 +9,7 @@ import (
 	"quantify/internal/config"
 )
 
-func Download(configPath, code, from string, all bool) error {
+func Download(configPath, code, from string, all, syncInfo bool) error {
 	cfg, err := config.LoadConfig(configPath)
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
@@ -27,6 +27,10 @@ func Download(configPath, code, from string, all bool) error {
 	}
 
 	scriptArgs := []string{"-m", "quantify.data.downloader", "--db", cfg.DB.Path}
+
+	if syncInfo {
+		scriptArgs = append(scriptArgs, "--sync-info")
+	}
 
 	if all || code == "" {
 		scriptArgs = append(scriptArgs, "--all")

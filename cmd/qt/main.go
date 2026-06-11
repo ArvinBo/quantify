@@ -47,9 +47,11 @@ func runDownload(args []string) {
 	var all bool
 	fs.BoolVar(&all, "a", false, "download all symbols")
 	fs.BoolVar(&all, "all", false, "download all symbols")
+	var syncInfo bool
+	fs.BoolVar(&syncInfo, "sync-info", false, "sync stock info from akshare")
 	fs.Parse(args)
 
-	if err := cmd.Download(*configPath, *code, *from, all); err != nil {
+	if err := cmd.Download(*configPath, *code, *from, all, syncInfo); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}

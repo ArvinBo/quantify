@@ -32,6 +32,14 @@ make download         # 下载行情数据
 ./bin/qt download -s 600519.SH -f 2024-01-01
 ```
 
+修改 Go 代码后重新编译：
+
+```bash
+make build
+# 或直接执行
+go build -o bin/qt ./cmd/qt
+```
+
 ---
 
 ## 项目结构
