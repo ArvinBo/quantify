@@ -2,8 +2,24 @@ db:
   path: ./data/quantify.db
 
 data:
-  source: akshare
+  source: akshare               # akshare | tushare
   start_date: "2015-01-01"
   symbols:
     - "000001.SZ"
     - "600519.SH"
+  tushare:
+    token: ""                   # https://tushare.pro 个人中心获取，留空则读环境变量 TUSHARE_TOKEN
+
+backtest:
+  capital: 100000               # 初始资金
+  commission_rate: 0.0003       # 佣金费率（万 3）
+  commission_min: 5             # 单笔最低佣金
+  stamp_tax_rate: 0.0005        # 印花税（卖出收取）
+
+risk:
+  capital: 100000               # 实盘账户资金
+  max_position_pct: 0.3         # 单票最大仓位占比
+  max_daily_loss_pct: 0.05      # 日亏损上限（接入实时行情后生效）
+
+trade:
+  mode: dry-run                 # dry-run | qmt

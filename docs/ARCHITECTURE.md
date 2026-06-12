@@ -25,7 +25,6 @@
               ┌──────────────┴──────────────┐
               │                             │
         qt download                   qt backtest
-              │                        (规划中)
               │                             │
      ┌────────┴────────┐           ┌────────┴────────┐
      │  Go spawn       │           │  Go spawn       │
@@ -35,51 +34,79 @@
               ▼                             ▼
      ┌────────────────┐           ┌────────────────┐
      │  Python         │           │  Python         │
-     │  akshare 下载    │           │  SQLite 取行情   │
-     │  → 写入 SQLite   │           │  → 策略算信号    │
-     │                  │           │  → 模拟撮合      │
+     │  akshare/tushare │           │  SQLite 取行情   │
+     │  下载 → 标准化   │           │  → 策略算信号    │
+     │  → 写入 SQLite   │           │  → 模拟撮合      │
      │                  │           │  → 输出指标      │
-     └────────┬─────────┘           └────────────────┘
+     └────────┬─────────┘           └────────┬────────┘
               │                             │
-               ▼                             │
-      ┌────────────────────────────┐         │
-      │      data/quantify.db       │◄────────┘
-      │                            │
-      │   daily_kline_tab (行情)    │
-      │   backtest_results (回测)   │
-      └────────────────────────────┘
+               ▼                             ▼
+      ┌─────────────────────────────────────────┐
+      │           data/quantify.db               │
+      │                                         │
+      │   daily_kline_tab (行情)                 │
+      │   stock_info_tab (股票信息)              │
+      │   backtest_result_tab (回测结果)         │
+      └─────────────────────────────────────────┘
 ```
 
-Go 现在只触发任务不直接读表，Python 承担全部量化工作。
+研究阶段 Go 只触发任务（`qt stats` 除外），Python 承担全部量化工作。
+
+### 数据源
+
+数据源由 `config/default.yaml` 的 `data.source` 切换，所有源在 `python/quantify/data/sources.py`
+统一标准化为同一套列（trade_date / open / high / low / close / volume(股) / amount(元)，前复权）：
+
+| 数据源 | 配置值 | 说明 |
+|--------|--------|------|
+| akshare | `akshare` | 免费免注册，走东方财富接口，海外网络可能不可达 |
+| [tushare.pro](https://tushare.pro) | `tushare` | 需 token（`data.tushare.token` 或环境变量 `TUSHARE_TOKEN`），稳定，支持前复权与全市场股票列表 |
 
 ---
 
-### 实盘阶段（未来）
+### 实盘阶段（骨架已实现，dry-run 模式）
+
+`qt run` 一条命令串起整个链路（单次执行，可由 cron 定时调度）：
 
 ```
-     ┌─────────────────────┐
-     │  Python (定时/事件)       │
-     │  因子计算 → 产生信号   │
-     └──────────┬──────────┘
+     ┌─────────────────────────┐
+     │  Python signal_gen       │   qt run 第一步 spawn
+     │  最近 N 根 K 线跑策略     │
+     │  最新 bar 出现买卖信号    │
+     └──────────┬──────────────┘
                 │
-       INSERT INTO signals
+       INSERT INTO signal_tab (PENDING)
                 │
                 ▼
-     ┌─────────────────────┐
-     │  Go (定时轮询)          │
-     │                       │
-     │  读 signals 表        │──── Go 读表的核心意义
-     │    ↓                  │
-     │  风控检查              │     Python 不能直接下单
-     │  · 单票仓位超限？      │     Go 是唯一的下单通道
-     │  · 日亏损超限？        │
-     │  · 可用资金够吗？      │
-     │    ↓                  │
-     │  xttrader 下单        │
-     └───────────────────────┘
+     ┌─────────────────────────┐
+     │  Go (qt run 第二步)       │
+     │                          │
+     │  读 signal_tab           │──── Go 读表的核心意义
+     │    ↓                     │
+     │  risk.Checker 风控检查    │     Python 不能直接下单
+     │  · 单票仓位超限？         │     Go 是唯一的下单通道
+     │  · 可用资金够吗？         │
+     │  · 持仓够卖吗？           │
+     │  · 日亏损超限？(待实时行情)│
+     │    ↓                     │
+     │  trader.Trader 下单通道   │
+     │  · dry-run: 模拟成交      │ ← 当前模式
+     │  · qmt: xttrader (未来)   │
+     │    ↓                     │
+     │  写 order_tab / position_tab
+     │  信号置 EXECUTED/REJECTED │
+     └──────────────────────────┘
 ```
 
 Python 只负责"建议买入"，Go 决定"是否执行"。策略代码没有能力亏钱。
+
+实盘相关 Go 包：
+
+| 包 | 职责 |
+|----|------|
+| `internal/risk` | 下单前风控检查（仓位上限、可用资金、持仓校验） |
+| `internal/trader` | 下单通道接口；dry-run 已实现，QMT xttrader 实现同一接口即可接入 |
+| `internal/cmd/run.go` | 编排：spawn 信号生成 → 消费信号 → 风控 → 下单 → 记账 |
 
 ---
 
@@ -145,14 +172,14 @@ Go 和 Python 是两个独立的进程，不通过 HTTP、gRPC、管道等方式
 
 **谁触发谁**：Go → Python（单向，Go 是老板，Python 是打工人）。
 
-**实现文件**：`internal/cmd/download.go`
+**实现文件**：`internal/cmd/python.go`（公共 spawn 函数，download / backtest / run 共用）
 
 ```go
-c := exec.Command(venvPython, "-m", "quantify.data.downloader",
-    "--db", dbPath, "--all")
-c.Dir = "python/"          // 让 Python 找到 quantify 包
-c.Stdout = os.Stdout        // Python 的 print → 终端
-c.Run()                     // 阻塞，等 Python 退出
+runPython("quantify.data.downloader", "--db", dbPath, "--all")
+// 内部: exec.Command(venvPython, "-m", module, args...)
+//       c.Dir = "python/"   让 Python 找到 quantify 与 strategies 包
+//       c.Stdout = os.Stdout Python 的 print → 终端
+//       c.Run()             阻塞，等 Python 退出
 ```
 
 **局限**：这是"一次性"的协作。Python 跑完就退出，Go 不能中途和它对话。适合离线任务（下载、回测），不适合实时交互。
@@ -165,8 +192,9 @@ c.Run()                     // 阻塞，等 Python 退出
 
 **什么时候用**：
 
-- **当下**：Python 下载数据写入 daily_kline_tab，回测时 Python 再读出来。Go 暂不直接读。
-- **将来**：Python 把信号写入 `signals` 表，Go 读出来做风控下单。Python 回测结果写入 `backtest_results` 表，Go 读出来展示。
+- Python 下载数据写入 `daily_kline_tab`，回测时 Python 再读出来；回测结果写入 `backtest_result_tab`
+- Python 把信号写入 `signal_tab`，Go 读出来做风控下单，并维护 `order_tab` / `position_tab`
+- `qt stats` 中 Go 直接读行情统计与持仓
 
 **谁触发谁**：无主次。双方平等读写，不分先后。
 
@@ -174,8 +202,8 @@ c.Run()                     // 阻塞，等 Python 退出
 
 | Go | Python |
 |----|--------|
-| `db/daily_kline_repo.go` （GORM） | `data/downloader.py` （sqlite3） |
-| `model/dbmodel/daily_kline.go` （映射） | `data/schema.py` （建表 DDL） |
+| `db/*_repo.go` （GORM 仓储：行情/信号/订单/持仓） | `data/downloader.py`、`live/signal_gen.py` （sqlite3） |
+| `model/dbmodel/*.go` （表映射） | `data/schema.py` （建表 DDL，唯一建表入口） |
 
 **为什么不用 HTTP/gRPC**：项目跑在本地单机，SQLite 文件就是最快的 IPC。不加网络层，零配置，零延迟。
 
@@ -227,8 +255,7 @@ Python 关心 `symbols` 和 `start_date`，因为它要决定"下载哪些标的
 | 时效 | 一次性（任务跑完结束） | 持久（数据一直存在） | 启动时加载 |
 | Go 做的事 | 启动 + 等结果 | 读统计 / 读信号 | 拿 db.path |
 | Python 做的事 | 下载 / 回测 / 算因子 | 写数据 / 读行情 | 拿 symbols / 参数 |
-| 当下用到 | `qt download` | Python 写入行情 | 所有命令 |
-| 将来用到 | `qt backtest`, `qt run` | Go 读信号、风控下单 | 所有命令 |
+| 用到的命令 | `qt download` / `qt backtest` / `qt run` | `qt run`（Go 读信号写订单持仓）、`qt stats` | 所有命令 |
 
 ---
 
@@ -239,6 +266,6 @@ Python 关心 `symbols` 和 `start_date`，因为它要决定"下载哪些标的
 | CLI 框架 | Go stdlib `flag` | 命令少，够用，零依赖 |
 | 数据库 | SQLite + GORM | 零配置部署，Repository 模式可切换 |
 | Python 包管理 | uv | 极快，自带 venv 和 lock |
-| 行情源（研究） | akshare | 免费，覆盖 A 股日线 |
+| 行情源（研究） | akshare / tushare.pro | akshare 免费免注册；tushare 稳定、需 token，配置可切换 |
 | 行情+交易（实盘） | QMT xtquant | 券商提供，仅 Windows |
 | 日志 | loguru | Python 侧开箱即用 |

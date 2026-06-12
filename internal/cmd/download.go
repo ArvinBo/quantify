@@ -2,55 +2,36 @@ package cmd
 
 import (
 	"fmt"
-	"os"
-	"os/exec"
-	"path/filepath"
 
 	"quantify/internal/config"
 )
 
+// Download 下载行情数据：spawn Python 下载器，数据源由 config 的 data.source 决定。
 func Download(configPath, code, from string, all, syncInfo bool) error {
 	cfg, err := config.LoadConfig(configPath)
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
 
-	base, _ := os.Getwd()
-	pythonDir := filepath.Join(base, "python")
-
-	exe := filepath.Join(pythonDir, ".venv", "bin", "python")
-	if _, err := os.Stat(exe); os.IsNotExist(err) {
-		exe = "python3"
-		if _, err := exec.LookPath("python3"); err != nil {
-			exe = "python"
-		}
-	}
-
-	scriptArgs := []string{"-m", "quantify.data.downloader", "--db", cfg.DB.Path}
+	args := []string{"--db", cfg.DB.Path}
 
 	if syncInfo {
-		scriptArgs = append(scriptArgs, "--sync-info")
+		args = append(args, "--sync-info")
 	}
 
 	if all || code == "" {
-		scriptArgs = append(scriptArgs, "--all")
+		args = append(args, "--all")
 	} else {
-		scriptArgs = append(scriptArgs, "--code", code)
+		args = append(args, "--code", code)
 	}
 
 	if from != "" {
-		scriptArgs = append(scriptArgs, "--from", from)
+		args = append(args, "--from", from)
 	}
 
-	fmt.Printf("downloading data via %s...\n", exe)
-	c := exec.Command(exe, scriptArgs...)
-	c.Stdout = os.Stdout
-	c.Stderr = os.Stderr
-	c.Dir = pythonDir
-
-	if err := c.Run(); err != nil {
+	fmt.Printf("downloading data (source=%s)...\n", cfg.Data.Source)
+	if err := runPython("quantify.data.downloader", args...); err != nil {
 		return fmt.Errorf("download failed: %w", err)
 	}
-
 	return nil
 }
